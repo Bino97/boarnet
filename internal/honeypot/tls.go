@@ -1,21 +1,22 @@
 // TLS honeypot: accepts incoming TLS connections, parses the ClientHello,
-// computes JA3 + MD5 hash, and emits a `tls.clienthello` envelope. We send
-// back a server alert and close — no actual TLS state machine is maintained.
+// computes both the legacy JA3 (SSL-era) and FoxIO's JA4 fingerprints,
+// and emits a `tls.clienthello` envelope. We send back a server alert and
+// close — no actual TLS state machine is maintained.
 //
-// TODO(boarnet): add FoxIO JA4 support. JA4 requires a slightly different
-// canonicalization of extensions + ALPN. Keeping it separate so the
-// ja3/ja4 paths can evolve independently.
+// JA4 reference: https://github.com/FoxIO-LLC/ja4/blob/main/technical_details/JA4.md
 package honeypot
 
 import (
 	"context"
 	"crypto/md5"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
 	"net"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -84,10 +85,11 @@ func handleTLS(conn net.Conn, cfg TLSConfig) {
 	env.EventType = envelope.EventTLSClientHello
 	env.Src = envelope.Source{IP: srcHost, IPHash: ipHash, Port: srcPort}
 	env.Dst = envelope.Destination{Port: portFromListen(cfg.Listen), Proto: "tcp"}
+	ja4 := ja4Fingerprint(hello)
 	env.Fingerprints = envelope.Fingerprints{
 		JA3:     envelope.StrPtr(ja3),
 		JA3Hash: envelope.StrPtr(ja3Hash),
-		// JA4 TODO
+		JA4:     envelope.StrPtr(ja4),
 	}
 	raw := envelope.TLSClientHelloRaw{
 		TLSVersion:      fmt.Sprintf("0x%04x", hello.Version),
@@ -123,12 +125,14 @@ func emitTLSScanProbe(cfg TLSConfig, srcHost, ipHash string, srcPort, bytesIn in
 // --- ClientHello parsing ---
 
 type clientHello struct {
-	Version         uint16
-	Ciphersuites    []uint16
-	Extensions      []uint16
-	ALPN            []string
-	SNI             string
-	SupportedGroups []uint16
+	Version           uint16
+	Ciphersuites      []uint16
+	Extensions        []uint16 // order as seen on the wire
+	ALPN              []string
+	SNI               string
+	SupportedGroups   []uint16
+	SupportedVersions []uint16 // from extension 43 (0x002b)
+	SignatureAlgs     []uint16 // from extension 13 (0x000d), wire order preserved
 }
 
 func readClientHello(conn net.Conn) (*clientHello, []byte, error) {
@@ -250,6 +254,31 @@ func parseClientHelloBody(b []byte) (*clientHello, []byte, error) {
 					}
 				}
 			}
+		case 13: // signature_algorithms — JA4 second hash uses these in
+			// *wire order*, not sorted. The inner structure is a
+			// 2-byte length prefix then N 2-byte sig-alg codes.
+			if len(data) >= 2 {
+				ln := int(data[0])<<8 | int(data[1])
+				list := data[2:]
+				if len(list) >= ln {
+					for i := 0; i+1 < ln; i += 2 {
+						h.SignatureAlgs = append(h.SignatureAlgs, uint16(list[i])<<8|uint16(list[i+1]))
+					}
+				}
+			}
+		case 43: // supported_versions (client). 1-byte list length then
+			// N 2-byte version codes. Used for JA4's version digit:
+			// TLS 1.3 advertises via this extension instead of the
+			// legacy_version field which stays pinned at 0x0303.
+			if len(data) >= 1 {
+				ln := int(data[0])
+				list := data[1:]
+				if len(list) >= ln {
+					for i := 0; i+1 < ln; i += 2 {
+						h.SupportedVersions = append(h.SupportedVersions, uint16(list[i])<<8|uint16(list[i+1]))
+					}
+				}
+			}
 		}
 		exts = exts[4+l:]
 	}
@@ -267,6 +296,178 @@ func ja3String(h *clientHello) string {
 		"", // EC point formats — we don't parse ext 11; empty per JA3 convention
 	}
 	return strings.Join(parts, ",")
+}
+
+// ------------- JA4 -------------
+//
+// Fingerprint format:
+//   {proto}{ver}{sni}{cipherCount:2d}{extCount:2d}{alpn2} _ cipherHash12 _ extSigHash12
+//
+// - proto: 't' (TLS), 'q' (QUIC), 'd' (DTLS). We only accept TLS here.
+// - ver:   two-char version code derived from the MAX of supported_versions
+//          (ext 43) if present, otherwise the legacy_version field.
+// - sni:   'd' if SNI extension was present with a domain, 'i' otherwise.
+// - cipherCount/extCount: decimal counts with GREASE values excluded.
+//          Extension count further excludes SNI (0) and ALPN (16).
+// - alpn2: first + last character of the first ALPN value, or "00" if
+//          no ALPN extension. Non-ASCII/non-printable → "99".
+// - cipherHash12: first 12 hex of sha256 of comma-joined sorted ciphers
+//                 (lowercase 4-digit hex, GREASE excluded).
+// - extSigHash12: first 12 hex of sha256 of
+//                   <comma-joined sorted exts>_<comma-joined wire-order sig-algs>
+//                 (lowercase 4-digit hex, GREASE + SNI + ALPN excluded
+//                 from the ext set; sig-algs NOT sorted).
+//
+// When a section has no members the canonical form uses 12 zeros
+// instead of hashing the empty string, per FoxIO's reference impl.
+
+func isGREASE(v uint16) bool {
+	hi := byte(v >> 8)
+	lo := byte(v & 0xff)
+	return hi == lo && (lo&0x0f) == 0x0a
+}
+
+func ja4VersionCode(h *clientHello) string {
+	// Pick the highest non-GREASE supported_version; fall back to
+	// legacy_version when the extension wasn't sent.
+	best := uint16(0)
+	for _, v := range h.SupportedVersions {
+		if isGREASE(v) {
+			continue
+		}
+		if v > best {
+			best = v
+		}
+	}
+	if best == 0 {
+		best = h.Version
+	}
+	switch best {
+	case 0x0304:
+		return "13"
+	case 0x0303:
+		return "12"
+	case 0x0302:
+		return "11"
+	case 0x0301:
+		return "10"
+	case 0x0300:
+		return "s3"
+	case 0x0200:
+		return "s2"
+	}
+	return "00"
+}
+
+func ja4AlpnCode(h *clientHello) string {
+	if len(h.ALPN) == 0 || len(h.ALPN[0]) == 0 {
+		return "00"
+	}
+	a := h.ALPN[0]
+	first, last := a[0], a[len(a)-1]
+	// Restrict to printable ASCII letters+digits; anything else → "99"
+	// per the FoxIO spec for non-standard protocols.
+	ok := func(c byte) bool {
+		return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
+	}
+	if !ok(first) || !ok(last) {
+		return "99"
+	}
+	return string([]byte{first, last})
+}
+
+func sha12(input string) string {
+	if input == "" {
+		return "000000000000"
+	}
+	sum := sha256.Sum256([]byte(input))
+	return hex.EncodeToString(sum[:])[:12]
+}
+
+func joinHexSorted(vals []uint16) string {
+	out := make([]string, 0, len(vals))
+	for _, v := range vals {
+		if isGREASE(v) {
+			continue
+		}
+		out = append(out, fmt.Sprintf("%04x", v))
+	}
+	sort.Strings(out)
+	return strings.Join(out, ",")
+}
+
+func joinHexWire(vals []uint16) string {
+	out := make([]string, 0, len(vals))
+	for _, v := range vals {
+		if isGREASE(v) {
+			continue
+		}
+		out = append(out, fmt.Sprintf("%04x", v))
+	}
+	return strings.Join(out, ",")
+}
+
+func ja4Fingerprint(h *clientHello) string {
+	// Cipher list — GREASE filtered; sorted for the hash input and for
+	// the count, so a reordered-but-same-set ClientHello hashes identically.
+	var ciphers []uint16
+	for _, c := range h.Ciphersuites {
+		if !isGREASE(c) {
+			ciphers = append(ciphers, c)
+		}
+	}
+
+	// Extensions for the hash: exclude GREASE, SNI (0), ALPN (16). The
+	// count includes SNI/ALPN but excludes GREASE — two different sets.
+	var extsForCount []uint16
+	var extsForHash []uint16
+	for _, e := range h.Extensions {
+		if isGREASE(e) {
+			continue
+		}
+		extsForCount = append(extsForCount, e)
+		if e == 0 || e == 16 {
+			continue
+		}
+		extsForHash = append(extsForHash, e)
+	}
+
+	sniFlag := "i"
+	if h.SNI != "" {
+		sniFlag = "d"
+	}
+
+	prefix := fmt.Sprintf(
+		"t%s%s%02d%02d%s",
+		ja4VersionCode(h),
+		sniFlag,
+		min2d(len(ciphers)),
+		min2d(len(extsForCount)),
+		ja4AlpnCode(h),
+	)
+
+	cipherHash := sha12(joinHexSorted(ciphers))
+
+	var extSigInput string
+	if len(extsForHash) == 0 && len(h.SignatureAlgs) == 0 {
+		extSigInput = ""
+	} else {
+		extSigInput = joinHexSorted(extsForHash) + "_" + joinHexWire(h.SignatureAlgs)
+	}
+	extSigHash := sha12(extSigInput)
+
+	return prefix + "_" + cipherHash + "_" + extSigHash
+}
+
+// min2d clamps a count to the 00..99 two-digit JA4 field.
+func min2d(n int) int {
+	if n > 99 {
+		return 99
+	}
+	if n < 0 {
+		return 0
+	}
+	return n
 }
 
 func ciphersuitesAsHex(s []uint16) []string {
