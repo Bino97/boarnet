@@ -45,6 +45,14 @@ type Buffer struct {
 // Open initializes (or opens) a buffer at dataDir. Loads the AES-GCM key from
 // dataDir/key (creating one if missing) and opens the SQLite file at
 // dataDir/buffer.db.
+//
+// The DSN pragmas are load-bearing: without WAL mode, the honeypot's enqueue
+// goroutines and the drain goroutine contend for a single writer lock on the
+// rollback journal, and any slow write starves everyone else into SQLITE_BUSY
+// — which in production manifested as the drainer looping on "database is
+// locked" for hours after enough concurrent traffic piled up. WAL gives us
+// one-writer-N-readers without the journal dance, and busy_timeout makes
+// every call wait out transient contention instead of failing outright.
 func Open(dataDir string) (*Buffer, error) {
 	if err := os.MkdirAll(dataDir, 0o700); err != nil {
 		return nil, fmt.Errorf("mkdir data dir: %w", err)
@@ -64,9 +72,27 @@ func Open(dataDir string) (*Buffer, error) {
 		return nil, fmt.Errorf("aes-gcm: %w", err)
 	}
 
-	db, err := sql.Open("sqlite", filepath.Join(dataDir, "buffer.db"))
+	dbPath := filepath.Join(dataDir, "buffer.db")
+	dsn := "file:" + dbPath +
+		"?_pragma=journal_mode(wal)" +
+		"&_pragma=busy_timeout(5000)" +
+		"&_pragma=synchronous(normal)" +
+		"&_pragma=foreign_keys(1)"
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
+	}
+	// Apply pragmas defensively on at least one pooled connection too —
+	// modernc.org/sqlite's URI parameters are the intended path but we Exec
+	// them as well so a future driver upgrade can't silently disable WAL.
+	for _, p := range []string{
+		"PRAGMA journal_mode = WAL",
+		"PRAGMA busy_timeout = 5000",
+		"PRAGMA synchronous = NORMAL",
+	} {
+		if _, err := db.Exec(p); err != nil {
+			return nil, fmt.Errorf("pragma %q: %w", p, err)
+		}
 	}
 	if _, err := db.Exec(schema); err != nil {
 		return nil, fmt.Errorf("migrate: %w", err)
