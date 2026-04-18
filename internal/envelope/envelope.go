@@ -130,10 +130,23 @@ type TLSClientHelloRaw struct {
 }
 
 type ScanProbeRaw struct {
-	DurationMS int  `json:"duration_ms"`
-	BytesIn    int  `json:"bytes_in"`
-	BytesOut   int  `json:"bytes_out"`
-	RSTSent    bool `json:"rst_sent"`
+	DurationMS  int    `json:"duration_ms"`
+	BytesIn     int    `json:"bytes_in"`
+	BytesOut    int    `json:"bytes_out"`
+	RSTSent     bool   `json:"rst_sent"`
+	BannerHint  string `json:"banner_hint,omitempty"`  // first printable bytes (≤128) the client sent
+}
+
+type HTTPRequestRaw struct {
+	Method        string            `json:"method"`
+	Path          string            `json:"path"`
+	HTTPVersion   string            `json:"http_version"`
+	Host          string            `json:"host,omitempty"`
+	UserAgent     string            `json:"user_agent,omitempty"`
+	Headers       map[string]string `json:"headers"`
+	ContentLength int64             `json:"content_length"`
+	BodySHA256    string            `json:"body_sha256,omitempty"`
+	BodyPreview   string            `json:"body_preview,omitempty"` // first 512 bytes, UTF-8 sanitized
 }
 
 type HeartbeatRaw struct {

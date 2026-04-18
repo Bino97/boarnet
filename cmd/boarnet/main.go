@@ -17,6 +17,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -72,7 +73,7 @@ func run() error {
 		}
 	}
 
-	hostKey, err := ephemeralHostKey()
+	hostKey, err := loadOrCreateHostKey(cfg.DataDir)
 	if err != nil {
 		return fmt.Errorf("ssh host key: %w", err)
 	}
@@ -101,6 +102,36 @@ func run() error {
 		return fmt.Errorf("start tls honeypot: %w", err)
 	}
 	defer stopTLS()
+
+	if cfg.HTTPPort != "" && cfg.HTTPPort != "0" {
+		stopHTTP, err := honeypot.StartHTTP(ctx, honeypot.HTTPConfig{
+			Listen:     ":" + cfg.HTTPPort,
+			Pepper:     cfg.Pepper,
+			SensorInfo: sensorInfo,
+			OnEvent:    onEvent,
+			Log:        log,
+		})
+		if err != nil {
+			log.Error("start http honeypot failed (continuing)", "err", err)
+		} else {
+			defer stopHTTP()
+		}
+	}
+
+	if len(cfg.SynSinkPorts) > 0 {
+		stopSyn, err := honeypot.StartSYNSink(ctx, honeypot.SYNSinkConfig{
+			Ports:      cfg.SynSinkPorts,
+			Pepper:     cfg.Pepper,
+			SensorInfo: sensorInfo,
+			OnEvent:    onEvent,
+			Log:        log,
+		})
+		if err != nil {
+			log.Error("start synsink failed (continuing)", "err", err)
+		} else {
+			defer stopSyn()
+		}
+	}
 
 	client := transport.New(cfg.IngestURL, cfg.Token, buf, log)
 
@@ -155,16 +186,29 @@ func heartbeatLoop(
 	}
 }
 
-// ephemeralHostKey generates a fresh Ed25519 SSH host key. Production agents
-// should persist this across restarts so SSH clients see a stable identity —
-// otherwise attacker tooling will flag host-key changes and may skip the
-// honeypot. TODO(boarnet): load from dataDir/ssh_host_ed25519_key.
-func ephemeralHostKey() (ssh.Signer, error) {
+// loadOrCreateHostKey reads or creates the SSH host key used by the
+// honeypot. Persisting across restarts means scanner tooling sees a
+// stable identity (matching fingerprint in their local known_hosts),
+// which is important because a changing host key gets a connection
+// flagged or abandoned by any adversary that cares.
+//
+// Stored in the existing data-dir next to the pepper + buffer, mode
+// 0600. First run creates a fresh Ed25519 key.
+func loadOrCreateHostKey(dataDir string) (ssh.Signer, error) {
+	path := filepath.Join(dataDir, "ssh_host_ed25519_key")
+	if b, err := os.ReadFile(path); err == nil {
+		signer, err := ssh.ParsePrivateKey(b)
+		if err == nil {
+			return signer, nil
+		}
+		// Corrupt or wrong-type file; fall through to regen so the sensor
+		// keeps running. The old file is overwritten.
+	}
+
 	_, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		return nil, err
 	}
-
 	pemBlock, err := ssh.MarshalPrivateKey(priv, "boarnet")
 	if err != nil {
 		return nil, err
@@ -172,6 +216,9 @@ func ephemeralHostKey() (ssh.Signer, error) {
 	var buf bytes.Buffer
 	if err := pem.Encode(&buf, pemBlock); err != nil {
 		return nil, err
+	}
+	if err := os.WriteFile(path, buf.Bytes(), 0o600); err != nil {
+		return nil, fmt.Errorf("write host key: %w", err)
 	}
 	signer, err := ssh.ParsePrivateKey(buf.Bytes())
 	if err != nil {
