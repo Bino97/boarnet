@@ -48,7 +48,11 @@ func StartSSH(ctx context.Context, cfg SSHConfig) (stop func() error, err error)
 	// password is emitted alongside the sha256 hint so the server can
 	// classify it against wordlists at ingest and surface unique
 	// credentials to researchers on the threat detail page. Hash stays
-	// for tooling that expects the legacy "sha256:..." shape.
+	// for tooling that expects the legacy "sha256:..." shape. The
+	// client banner (SSH-2.0-OpenSSH_9.3, SSH-2.0-libssh2, etc.) is
+	// already available from ctx.ClientVersion() by the time an auth
+	// handler fires — the banner exchange completes before any
+	// NEWKEYS, and gossh records it on the connection context.
 	server.PasswordHandler = func(ctx gossh.Context, password string) bool {
 		srcHost, srcPort := splitHostPort(ctx.RemoteAddr())
 		ipHash, _ := cfg.Pepper.SrcIPHash(srcHost)
@@ -59,6 +63,7 @@ func StartSSH(ctx context.Context, cfg SSHConfig) (stop func() error, err error)
 			Username:       ctx.User(),
 			CredentialHint: hash.CredentialHint(password),
 			Password:       password,
+			ClientBanner:   ctx.ClientVersion(),
 		}
 		emit(cfg, envelope.EventSSHAuthAttempt, srcHost, ipHash, srcPort, raw, []string{"ssh", "bruteforce-candidate"})
 		return false
@@ -73,6 +78,7 @@ func StartSSH(ctx context.Context, cfg SSHConfig) (stop func() error, err error)
 			Method:         "publickey",
 			Username:       ctx.User(),
 			CredentialHint: hash.CredentialHint(string(key.Marshal())),
+			ClientBanner:   ctx.ClientVersion(),
 		}
 		emit(cfg, envelope.EventSSHAuthAttempt, srcHost, ipHash, srcPort, raw, []string{"ssh", "publickey"})
 		return false

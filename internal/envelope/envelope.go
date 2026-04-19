@@ -117,6 +117,12 @@ type SSHAuthAttemptRaw struct {
 	// researchers can pivot on unique credentials without sifting
 	// through millions of `123456` sprays.
 	Password        string `json:"password,omitempty"`
+	// ClientBanner is the SSH identification string the client sent
+	// before auth — "SSH-2.0-OpenSSH_9.3", "SSH-2.0-libssh2_1.10.0",
+	// "SSH-2.0-Go", "SSH-2.0-paramiko_2.11.0", etc. Strong toolkit
+	// fingerprint; the same banner across multiple IPs with the same
+	// JA4/credential pattern is a reliable same-operator signal.
+	ClientBanner    string `json:"client_banner,omitempty"`
 }
 
 type SSHCmdExecRaw struct {
