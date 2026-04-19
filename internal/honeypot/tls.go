@@ -365,13 +365,17 @@ func ja4AlpnCode(h *clientHello) string {
 	}
 	a := h.ALPN[0]
 	first, last := a[0], a[len(a)-1]
-	// Restrict to printable ASCII letters+digits; anything else → "99"
-	// per the FoxIO spec for non-standard protocols.
+	// Per FoxIO JA4 spec: use the first and last ASCII alphanumeric
+	// character of the first ALPN value. When either byte is
+	// non-alphanumeric, fall back to the first hex-nibble of the first
+	// byte concatenated with the last hex-nibble of the last byte. So
+	// `0xAB 0xCD` → "ad"; `0x30 0xAB` → "3b".
 	ok := func(c byte) bool {
 		return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
 	}
 	if !ok(first) || !ok(last) {
-		return "99"
+		const hexc = "0123456789abcdef"
+		return string([]byte{hexc[first>>4], hexc[last&0x0f]})
 	}
 	return string([]byte{first, last})
 }
