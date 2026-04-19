@@ -44,7 +44,11 @@ func StartSSH(ctx context.Context, cfg SSHConfig) (stop func() error, err error)
 	// first line of raw bytes on the net.Conn. For v0.1 we only emit
 	// auth.attempt events — they already carry everything the rollup needs.
 
-	// Every password attempt → ssh.auth.attempt, always deny.
+	// Every password attempt → ssh.auth.attempt, always deny. Plaintext
+	// password is emitted alongside the sha256 hint so the server can
+	// classify it against wordlists at ingest and surface unique
+	// credentials to researchers on the threat detail page. Hash stays
+	// for tooling that expects the legacy "sha256:..." shape.
 	server.PasswordHandler = func(ctx gossh.Context, password string) bool {
 		srcHost, srcPort := splitHostPort(ctx.RemoteAddr())
 		ipHash, _ := cfg.Pepper.SrcIPHash(srcHost)
@@ -54,6 +58,7 @@ func StartSSH(ctx context.Context, cfg SSHConfig) (stop func() error, err error)
 			Method:         "password",
 			Username:       ctx.User(),
 			CredentialHint: hash.CredentialHint(password),
+			Password:       password,
 		}
 		emit(cfg, envelope.EventSSHAuthAttempt, srcHost, ipHash, srcPort, raw, []string{"ssh", "bruteforce-candidate"})
 		return false

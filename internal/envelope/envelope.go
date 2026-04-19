@@ -110,6 +110,13 @@ type SSHAuthAttemptRaw struct {
 	Method          string `json:"method"`
 	Username        string `json:"username"`
 	CredentialHint  string `json:"credential_hint"` // always "sha256:<hex>"
+	// Password is the plaintext credential attempted. Populated only
+	// for Method=="password"; empty for publickey attempts (key bytes
+	// don't reduce to a meaningful string). The server classifies this
+	// against a bundled common-password wordlist at ingest time so
+	// researchers can pivot on unique credentials without sifting
+	// through millions of `123456` sprays.
+	Password        string `json:"password,omitempty"`
 }
 
 type SSHCmdExecRaw struct {
