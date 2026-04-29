@@ -35,6 +35,16 @@ import (
 var version = "dev"
 
 func main() {
+	// `boarnet --version` prints the build-stamped version and exits
+	// without parsing the rest of the flag set or starting any
+	// listeners. The install script (https://boarnet.io/install.sh)
+	// relies on this for its already-on-latest skip-check.
+	for _, a := range os.Args[1:] {
+		if a == "--version" || a == "-version" || a == "-v" {
+			fmt.Println(version)
+			return
+		}
+	}
 	if err := run(); err != nil {
 		fmt.Fprintln(os.Stderr, "fatal:", err)
 		os.Exit(1)
