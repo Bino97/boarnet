@@ -118,6 +118,21 @@ func run() error {
 		}
 	}
 
+	if cfg.HTTPSPort != "" && cfg.HTTPSPort != "0" {
+		stopHTTPS, err := honeypot.StartHTTPS(ctx, honeypot.HTTPSConfig{
+			Listen:     ":" + cfg.HTTPSPort,
+			Pepper:     cfg.Pepper,
+			SensorInfo: sensorInfo,
+			OnEvent:    onEvent,
+			Log:        log,
+		})
+		if err != nil {
+			log.Error("start https honeypot failed (continuing)", "err", err)
+		} else {
+			defer stopHTTPS()
+		}
+	}
+
 	if len(cfg.SynSinkPorts) > 0 {
 		stopSyn, err := honeypot.StartSYNSink(ctx, honeypot.SYNSinkConfig{
 			Ports:      cfg.SynSinkPorts,

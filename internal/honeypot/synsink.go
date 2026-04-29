@@ -2,6 +2,7 @@ package honeypot
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -12,6 +13,23 @@ import (
 	"github.com/Bino97/boarnet-agent/internal/envelope"
 	"github.com/Bino97/boarnet-agent/internal/hash"
 )
+
+// bannerHex returns the first min(len(b), 64) bytes as lowercase hex.
+// Paired with sanitizePreview so proto-classify.ts can detect binary
+// protocols that wouldn't survive the `.`-substitution in the hint
+// (TLS ClientHello, SMB2, MSSQL TDS, Postgres SSLRequest, memcached
+// binary). 64 bytes covers every canonical first-packet signature we
+// care about and keeps the envelope's raw field under 200B per probe.
+func bannerHex(b []byte) string {
+	if len(b) == 0 {
+		return ""
+	}
+	cap := 64
+	if len(b) < cap {
+		cap = len(b)
+	}
+	return hex.EncodeToString(b[:cap])
+}
 
 // SYNSinkConfig wires a SYN-sink listener covering an arbitrary list of
 // TCP ports. Each accepted connection records a scan.probe event and is
@@ -106,6 +124,7 @@ func handleSYN(cfg SYNSinkConfig, conn net.Conn, port int) {
 		BytesOut:   0,
 		RSTSent:    false,
 		BannerHint: sanitizePreview(buf[:n]),
+		BannerHex:  bannerHex(buf[:n]),
 	}
 
 	env := envelope.New(cfg.SensorInfo, cfg.Pepper.KeyID)

@@ -143,11 +143,21 @@ type TLSClientHelloRaw struct {
 }
 
 type ScanProbeRaw struct {
-	DurationMS  int    `json:"duration_ms"`
-	BytesIn     int    `json:"bytes_in"`
-	BytesOut    int    `json:"bytes_out"`
-	RSTSent     bool   `json:"rst_sent"`
-	BannerHint  string `json:"banner_hint,omitempty"`  // first printable bytes (≤128) the client sent
+	DurationMS int    `json:"duration_ms"`
+	BytesIn    int    `json:"bytes_in"`
+	BytesOut   int    `json:"bytes_out"`
+	RSTSent    bool   `json:"rst_sent"`
+	BannerHint string `json:"banner_hint,omitempty"` // first printable bytes (≤128) the client sent
+	// First ≤64 bytes of the raw payload as lowercase hex. Paired with
+	// BannerHint for protocol classification: the hint is lossy (non-
+	// printable bytes replaced with `.`) so binary-protocol probes like
+	// TLS ClientHello (0x16 0x03 …), SMB2 (0xFE "SMB"), MSSQL TDS
+	// PRELOGIN (0x12 …), Postgres SSLRequest (00000008 04d2162f) and
+	// Memcached binary (0x80) are invisible to the hint-based matchers.
+	// The hex field is consumed server-side by app/_lib/ingest/proto-
+	// classify.ts; absence = old agent version, classifier falls through
+	// to the hint-based path automatically.
+	BannerHex string `json:"banner_hex,omitempty"`
 }
 
 type HTTPRequestRaw struct {

@@ -20,8 +20,9 @@ type Config struct {
 	Fleet        envelope.Fleet
 	SSHPort      string
 	TLSPort      string
-	HTTPPort     string  // "" or "0" disables
-	SynSinkPorts []int   // empty disables
+	HTTPPort     string // "" or "0" disables
+	HTTPSPort    string // "" or "0" disables
+	SynSinkPorts []int  // empty disables
 	IngestURL    string
 	Token        string // TODO: replace with mTLS
 	DataDir      string
@@ -44,6 +45,7 @@ func Parse(args []string) (*Config, error) {
 	fs.StringVar(&cfg.SSHPort, "ssh-port", "2222", "ssh honeypot listen port")
 	fs.StringVar(&cfg.TLSPort, "tls-port", "8443", "tls honeypot listen port")
 	fs.StringVar(&cfg.HTTPPort, "http-port", "8080", "http honeypot listen port (empty or 0 disables)")
+	fs.StringVar(&cfg.HTTPSPort, "https-port", "4443", "https honeypot listen port — terminates TLS so the underlying HTTP path is captured (empty or 0 disables)")
 	synsink := fs.String("synsink-ports", DefaultSynSinkPorts, "comma-separated TCP ports for the SYN-sink catcher; empty disables")
 	fs.StringVar(&cfg.IngestURL, "ingest-url", "http://localhost:3000/v1/events", "ingest service URL")
 	fs.StringVar(&cfg.Token, "token", "", "bearer token (TEMPORARY — mTLS supersedes this)")
