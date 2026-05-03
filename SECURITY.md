@@ -4,7 +4,7 @@
 
 Found a vulnerability in the BoarNet agent? Please report it privately.
 
-- **Email**: security@boarnet.io
+- **Email**: boarthreatintelligence@proton.me
 - **GitHub**: open a [private security advisory](https://github.com/Bino97/boarnet/security/advisories/new)
 
 Please **do not** open a public issue for security reports.

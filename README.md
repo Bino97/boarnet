@@ -102,7 +102,7 @@ to a different ingest endpoint, that is your network — go for it.
 
 ## Security
 
-Found a vuln? Email security@boarnet.io or open a private security advisory
+Found a vuln? Email boarthreatintelligence@proton.me or open a private security advisory
 on GitHub. Agent-side issues are P0 — your network is running this code and
 we owe you a fast response.
 
